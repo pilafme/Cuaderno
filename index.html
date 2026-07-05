@@ -107,6 +107,21 @@
   }
   canvas{ display:block; width:100%; touch-action:none; }
 
+  .type-row{
+    display:flex; gap:8px; margin-top: 14px; align-items:stretch;
+  }
+  .type-input{
+    flex:1; border:none; border-bottom: 1.5px solid var(--paper-line);
+    background: transparent; font-size: 18px; padding: 8px 4px;
+    font-family: Georgia, serif; color: var(--ink); outline:none;
+  }
+  .type-input:focus{ border-bottom-color: var(--accent); }
+  .type-input:disabled{ color: var(--graphite); }
+  .or-divider{
+    text-align:center; font-size:11px; color: var(--graphite); margin-top:14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing:1px; text-transform:uppercase;
+  }
+
   .reveal-box{
     margin-top: 10px; text-align:center; min-height: 30px;
     font-family: Georgia, serif; font-size: 22px; color: var(--accent);
@@ -261,7 +276,8 @@
     return {
       'apikey': SUPABASE_KEY,
       'Authorization': `Bearer ${SUPABASE_KEY}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'x-app-secret': '2f824ec9e05e21e882fb4cb0fd323f18'
     };
   }
   function toRemote(w){
@@ -478,6 +494,11 @@
         <div class="prompt-word">${escapeHtml(currentWord.ru)}</div>
         <div class="prompt-example">${currentWord.example ? escapeHtml(currentWord.example.replace(currentWord.es, '···')) : ''}</div>
       </div>
+      <div class="type-row">
+        <input type="text" id="typeInput" class="type-input" placeholder="напечатай ответ…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button class="pill btn-show" id="btnCheck" style="flex:0 0 auto; padding:12px 16px;">Проверить</button>
+      </div>
+      <div class="or-divider">или напиши пером</div>
       <div class="canvas-wrap">
         <canvas id="writeCanvas"></canvas>
       </div>
@@ -494,12 +515,35 @@
     setupCanvas();
     document.getElementById('btnClear').addEventListener('click', clearCanvas);
     document.getElementById('btnShow').addEventListener('click', () => {
+      document.getElementById('revealBox').style.color = 'var(--accent)';
       document.getElementById('revealBox').textContent = currentWord.es;
       document.getElementById('rowPre').style.display = 'none';
       document.getElementById('rowPost').style.display = 'flex';
     });
     document.getElementById('btnGood').addEventListener('click', () => gradeCard(true));
     document.getElementById('btnBad').addEventListener('click', () => gradeCard(false));
+    document.getElementById('btnCheck').addEventListener('click', checkTyped);
+    document.getElementById('typeInput').addEventListener('keydown', (e) => {
+      if(e.key === 'Enter'){ e.preventDefault(); checkTyped(); }
+    });
+  }
+
+  function normalizeAnswer(s){
+    return s.trim().toLowerCase();
+  }
+
+  function checkTyped(){
+    const input = document.getElementById('typeInput');
+    const typed = input.value;
+    if(!typed.trim()) return;
+    const correct = normalizeAnswer(typed) === normalizeAnswer(currentWord.es);
+    const revealBox = document.getElementById('revealBox');
+    revealBox.textContent = currentWord.es;
+    revealBox.style.color = correct ? 'var(--good)' : 'var(--accent)';
+    document.getElementById('rowPre').style.display = 'none';
+    document.getElementById('rowPost').style.display = 'flex';
+    input.disabled = true;
+    showToast(correct ? 'Верно!' : 'Не совсем — сверься с ответом');
   }
 
   async function gradeCard(correct){
