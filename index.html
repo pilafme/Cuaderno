@@ -229,13 +229,18 @@
   const STORAGE_KEY = 'vocab-words-v1';
   const INTERVALS_DAYS = [0, 1, 2, 4, 7, 14, 30]; // box 0..6
 
+  const SUPABASE_URL = 'https://qpuynxrecywukcsfpxfq.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_xSLM8thfQTI2gnV98X4Ufw_L5ms4g7s';
+  const TABLE_URL = `${SUPABASE_URL}/rest/v1/words`;
+
   let words = [];
   let queue = [];
   let currentWord = null;
   let showingAll = false;
+  let online = true;
 
-  // ---------- storage (plain browser localStorage — works when hosted anywhere) ----------
-  async function loadWords(){
+  // ---------- local cache (instant load, works offline) ----------
+  function loadLocalCache(){
     try{
       const raw = localStorage.getItem(STORAGE_KEY);
       words = raw ? JSON.parse(raw) : [];
@@ -243,13 +248,94 @@
       words = [];
     }
   }
-  async function saveWords(){
+  function saveLocalCache(){
     try{
       localStorage.setItem(STORAGE_KEY, JSON.stringify(words));
     }catch(e){
-      console.error('storage save failed', e);
-      showToast('Не удалось сохранить :(');
+      console.error('local cache save failed', e);
     }
+  }
+
+  // ---------- cloud (Supabase) ----------
+  function sbHeaders(){
+    return {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json'
+    };
+  }
+  function toRemote(w){
+    return {
+      id: w.id, es: w.es, ru: w.ru, example: w.example || '',
+      box: w.box, next_review: w.nextReview,
+      created_at: w.createdAt, updated_at: w.updatedAt || w.createdAt
+    };
+  }
+  function fromRemote(r){
+    return {
+      id: r.id, es: r.es, ru: r.ru, example: r.example || '',
+      box: r.box, nextReview: r.next_review,
+      createdAt: r.created_at, updatedAt: r.updated_at
+    };
+  }
+  // remote entries win only if strictly newer than local; otherwise local wins (covers offline edits)
+  function mergeWords(local, remote){
+    const map = new Map();
+    local.forEach(w => map.set(w.id, { ...w, updatedAt: w.updatedAt || w.createdAt }));
+    remote.forEach(rw => {
+      const lw = map.get(rw.id);
+      if(!lw || rw.updatedAt > lw.updatedAt) map.set(rw.id, rw);
+    });
+    return Array.from(map.values());
+  }
+  async function fetchRemote(){
+    const res = await fetch(`${TABLE_URL}?select=*`, { headers: sbHeaders() });
+    if(!res.ok) throw new Error('fetch ' + res.status);
+    const rows = await res.json();
+    return rows.map(fromRemote);
+  }
+  async function pushWord(word){
+    try{
+      await fetch(`${TABLE_URL}?on_conflict=id`, {
+        method: 'POST',
+        headers: { ...sbHeaders(), 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify([toRemote(word)])
+      });
+    }catch(e){
+      console.warn('push failed (will retry on next sync)', e);
+    }
+  }
+  async function deleteRemoteWord(id){
+    try{
+      await fetch(`${TABLE_URL}?id=eq.${id}`, { method: 'DELETE', headers: sbHeaders() });
+    }catch(e){
+      console.warn('remote delete failed', e);
+    }
+  }
+  async function syncWithCloud(){
+    try{
+      const remoteWords = await fetchRemote();
+      const merged = mergeWords(words, remoteWords);
+      words = merged;
+      saveLocalCache();
+      // push anything local-only or newer-than-remote back up
+      const remoteMap = new Map(remoteWords.map(w => [w.id, w]));
+      for(const w of words){
+        const rw = remoteMap.get(w.id);
+        if(!rw || (w.updatedAt || w.createdAt) > rw.updatedAt){
+          await pushWord(w);
+        }
+      }
+      online = true;
+    }catch(e){
+      console.warn('sync failed, staying on local cache', e);
+      online = false;
+      showToast('Офлайн — синхронизирую при следующем подключении');
+    }
+  }
+
+  async function saveWords(){
+    saveLocalCache();
   }
 
   function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -286,8 +372,10 @@
       document.getElementById('saveMsg').textContent = 'Заполни оба поля.';
       return;
     }
-    words.push({ id: uid(), es, ru, example, box: 0, nextReview: todayTs(), createdAt: todayTs() });
+    const newWord = { id: uid(), es, ru, example, box: 0, nextReview: todayTs(), createdAt: todayTs(), updatedAt: todayTs() };
+    words.push(newWord);
     await saveWords();
+    pushWord(newWord);
     document.getElementById('inEs').value = '';
     document.getElementById('inRu').value = '';
     document.getElementById('inExample').value = '';
@@ -322,6 +410,7 @@
         const id = e.target.dataset.id;
         words = words.filter(w => w.id !== id);
         await saveWords();
+        deleteRemoteWord(id);
         renderList();
       });
     });
@@ -423,7 +512,9 @@
       }
       const days = INTERVALS_DAYS[w.box];
       w.nextReview = todayTs() + days * 24 * 60 * 60 * 1000;
+      w.updatedAt = todayTs();
       await saveWords();
+      pushWord(w);
     }
     document.getElementById('statusLine').textContent = `осталось: ${queue.length}`;
     nextCard();
@@ -490,11 +581,19 @@
 
   // ---------- init ----------
   async function init(){
-    await loadWords();
+    loadLocalCache();
+    const due0 = words.filter(w => w.nextReview <= todayTs()).length;
+    document.getElementById('headerSub').textContent =
+      words.length ? `${words.length} слов в тетради · ${due0} на сегодня` : 'исп. слова · перо по бумаге';
+    buildQueueAndRender();
+
+    document.getElementById('statusLine').textContent = 'синхронизация…';
+    await syncWithCloud();
     const due = words.filter(w => w.nextReview <= todayTs()).length;
     document.getElementById('headerSub').textContent =
       words.length ? `${words.length} слов в тетради · ${due} на сегодня` : 'исп. слова · перо по бумаге';
     buildQueueAndRender();
+    if(online) renderList();
   }
   init();
 })();
